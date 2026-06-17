@@ -21,6 +21,7 @@ export interface DownloadItem {
   addedAt: number;
   completedAt?: number;
   eta?: number; // seconds
+  finalFilePath?: string;
 }
 
 export interface LibraryFile {
@@ -59,6 +60,20 @@ export interface AppState {
   setTheme: (theme: Theme) => void;
   accentColor: string;
   setAccentColor: (color: string) => void;
+  searchQuery: string;
+  setSearchQuery: (query: string) => void;
+  hardwareAccel: boolean;
+  setHardwareAccel: (v: boolean) => void;
+  notifications: boolean;
+  setNotifications: (v: boolean) => void;
+  autoStart: boolean;
+  setAutoStart: (v: boolean) => void;
+  concurrentLimit: number;
+  setConcurrentLimit: (v: number) => void;
+  speedLimit: string;
+  setSpeedLimit: (v: string) => void;
+  defaultFolder: string;
+  setDefaultFolder: (v: string) => void;
 }
 
 const AppContext = createContext<AppState | null>(null);
@@ -70,19 +85,64 @@ const AppContext = createContext<AppState | null>(null);
 export function AppProvider({ children }: { children: ReactNode }) {
   const [activePage, setActivePage] = useState<Page>('dashboard');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [downloads, setDownloads] = useState<DownloadItem[]>(INITIAL_DOWNLOADS);
   const [isAddModalOpen, setIsAddModalOpen] = useState(false);
   const [addModalTab, setAddModalTab] = useState<'single' | 'batch' | 'import'>('single');
+  const [searchQuery, setSearchQuery] = useState('');
 
-  const [theme, setTheme] = useState<Theme>(() => {
-    const saved = localStorage.getItem('bucket-theme') as Theme;
-    return saved || 'amoled';
+  // Persisted state
+  const [downloads, setDownloads] = useState<DownloadItem[]>(() => {
+    try {
+      const saved = localStorage.getItem('bucket-downloads');
+      if (saved) {
+        const parsed = JSON.parse(saved) as DownloadItem[];
+        // Any download that was "downloading" when app closed is now "paused" or "failed"
+        return parsed.map(d => d.status === 'downloading' ? { ...d, status: 'paused', speed: 0, eta: 0 } : d);
+      }
+    } catch {}
+    return [];
   });
 
-  const [accentColor, setAccentColor] = useState<string>(() => {
-    const saved = localStorage.getItem('bucket-accent');
-    return saved || '#0095ff';
+  const [theme, setTheme] = useState<Theme>(() => (localStorage.getItem('bucket-theme') as Theme) || 'amoled');
+  const [accentColor, setAccentColor] = useState<string>(() => localStorage.getItem('bucket-accent') || '#0095ff');
+  
+  const [hardwareAccel, setHardwareAccel] = useState<boolean>(() => localStorage.getItem('bucket-hardwareAccel') !== 'false');
+  const [notifications, setNotifications] = useState<boolean>(() => localStorage.getItem('bucket-notifications') !== 'false');
+  const [autoStart, setAutoStart] = useState<boolean>(() => localStorage.getItem('bucket-autoStart') === 'true');
+  const [concurrentLimit, setConcurrentLimit] = useState<number>(() => parseInt(localStorage.getItem('bucket-concurrentLimit') || '3', 10));
+  const [speedLimit, setSpeedLimit] = useState<string>(() => localStorage.getItem('bucket-speedLimit') || 'unlimited');
+  const [defaultFolder, setDefaultFolder] = useState<string>(() => {
+    // If we're in electron, we could fetch default from main process, but for now fallback to standard
+    return localStorage.getItem('bucket-defaultFolder') || 'C:\\Users\\Downloads\\Bucket';
   });
+
+  // Effects to persist state
+  useEffect(() => {
+    localStorage.setItem('bucket-downloads', JSON.stringify(downloads));
+  }, [downloads]);
+
+  useEffect(() => {
+    localStorage.setItem('bucket-hardwareAccel', hardwareAccel.toString());
+  }, [hardwareAccel]);
+
+  useEffect(() => {
+    localStorage.setItem('bucket-notifications', notifications.toString());
+  }, [notifications]);
+
+  useEffect(() => {
+    localStorage.setItem('bucket-autoStart', autoStart.toString());
+  }, [autoStart]);
+
+  useEffect(() => {
+    localStorage.setItem('bucket-concurrentLimit', concurrentLimit.toString());
+  }, [concurrentLimit]);
+
+  useEffect(() => {
+    localStorage.setItem('bucket-speedLimit', speedLimit);
+  }, [speedLimit]);
+
+  useEffect(() => {
+    localStorage.setItem('bucket-defaultFolder', defaultFolder);
+  }, [defaultFolder]);
 
   useEffect(() => {
     const root = document.documentElement;
@@ -186,9 +246,17 @@ export function AppProvider({ children }: { children: ReactNode }) {
     cleanups.push(unsubMeta);
 
     // Completed
-    const unsubCompleted = window.electronAPI.onDownloadCompleted(dl.id, (_data: any) => {
+    const unsubCompleted = window.electronAPI.onDownloadCompleted(dl.id, (data: any) => {
       setDownloads(prev => prev.map(item =>
-        item.id !== dl.id ? item : { ...item, status: 'completed', completedAt: Date.now(), speed: 0, eta: 0, downloaded: item.size > 0 ? item.size : item.downloaded }
+        item.id !== dl.id ? item : { 
+          ...item, 
+          status: 'completed', 
+          completedAt: Date.now(), 
+          speed: 0, 
+          eta: 0, 
+          downloaded: item.size > 0 ? item.size : item.downloaded,
+          finalFilePath: data.filePath 
+        }
       ));
       // Self-clean all listeners for this download
       const fns = ipcCleanupRef.current.get(dl.id);
@@ -210,6 +278,36 @@ export function AppProvider({ children }: { children: ReactNode }) {
     ipcCleanupRef.current.set(dl.id, cleanups);
   }, []);
 
+  // Queue Manager
+  useEffect(() => {
+    const activeCount = downloads.filter(d => d.status === 'downloading').length;
+    if (activeCount < concurrentLimit) {
+      const nextInQueue = downloads.find(d => d.status === 'queued');
+      if (nextInQueue) {
+        if ((window as any).electronAPI) {
+          registerDownloadListeners(nextInQueue);
+          try {
+            console.log('[renderer] starting from queue', { id: nextInQueue.id, url: nextInQueue.url });
+            (window as any).electronAPI.startDownload({
+              id: nextInQueue.id,
+              url: nextInQueue.url,
+              filename: nextInQueue.filename,
+              defaultFolder,
+              downloaded: nextInQueue.downloaded || 0,
+            });
+          } catch (err) {
+            console.error('[renderer] startDownload error', err);
+            setDownloads(prev => prev.map(d => d.id === nextInQueue.id ? { ...d, status: 'failed' } : d));
+            const fns = ipcCleanupRef.current.get(nextInQueue.id);
+            if (fns) { fns.forEach(f => f()); ipcCleanupRef.current.delete(nextInQueue.id); }
+            return;
+          }
+        }
+        setDownloads(prev => prev.map(d => d.id === nextInQueue.id ? { ...d, status: 'downloading' } : d));
+      }
+    }
+  }, [downloads, concurrentLimit, defaultFolder, registerDownloadListeners]);
+
   const addDownload = useCallback((filename: string, url: string, size: number, category: FileCategory) => {
     const id = crypto.randomUUID();
     const newDl: DownloadItem = {
@@ -219,29 +317,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
       size,
       downloaded: 0,
       speed: 0,
-      status: (window as any).electronAPI ? 'downloading' : 'queued',
+      status: 'queued',
       category,
       addedAt: Date.now(),
     };
 
     setDownloads(prev => [...prev, newDl]);
-
-    if ((window as any).electronAPI) {
-      // Register IPC listeners BEFORE telling main process to start,
-      // so we never miss the first progress/metadata event.
-      registerDownloadListeners(newDl);
-      try {
-        console.log('[renderer] startDownload', { id, url, filename });
-        (window as any).electronAPI.startDownload({ id, url, filename });
-      } catch (err) {
-        console.error('[renderer] startDownload error', err);
-        setDownloads(prev => prev.map(d => d.id === id ? { ...d, status: 'failed' as DownloadStatus } : d));
-        // Clean up listeners we just registered
-        const fns = ipcCleanupRef.current.get(id);
-        if (fns) { fns.forEach(f => f()); ipcCleanupRef.current.delete(id); }
-      }
-    }
-  }, [setDownloads, registerDownloadListeners]);
+  }, []);
 
   const pauseDownload = useCallback((id: string) => {
     if ((window as any).electronAPI) {
@@ -254,14 +336,8 @@ export function AppProvider({ children }: { children: ReactNode }) {
   }, [setDownloads]);
 
   const resumeDownload = useCallback((id: string) => {
-    const dl = downloads.find(d => d.id === id);
-    if ((window as any).electronAPI && dl) {
-      // Re-register listeners for the resumed download
-      registerDownloadListeners(dl);
-      (window as any).electronAPI.startDownload({ id: dl.id, url: dl.url, filename: dl.filename });
-    }
-    setDownloads(prev => prev.map(d => d.id === id ? { ...d, status: 'downloading' as DownloadStatus } : d));
-  }, [downloads, setDownloads, registerDownloadListeners]);
+    setDownloads(prev => prev.map(d => d.id === id ? { ...d, status: 'queued' as DownloadStatus } : d));
+  }, []);
 
   const cancelDownload = useCallback((id: string) => {
     if ((window as any).electronAPI) {
@@ -287,7 +363,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       size: d.size,
       category: d.category,
       addedAt: d.completedAt || d.addedAt,
-      path: `C:\\Downloads\\Bucket\\${d.filename}`, // Example path
+      path: d.finalFilePath || `C:\\Downloads\\Bucket\\${d.filename}`,
     }));
 
   const globalSpeed = downloads
@@ -313,6 +389,13 @@ export function AppProvider({ children }: { children: ReactNode }) {
       openAddModal, closeAddModal,
       theme, setTheme,
       accentColor, setAccentColor,
+      searchQuery, setSearchQuery,
+      hardwareAccel, setHardwareAccel,
+      notifications, setNotifications,
+      autoStart, setAutoStart,
+      concurrentLimit, setConcurrentLimit,
+      speedLimit, setSpeedLimit,
+      defaultFolder, setDefaultFolder,
     }}>
       {children}
     </AppContext.Provider>
@@ -406,33 +489,3 @@ export function getCategoryColor(cat: FileCategory): string {
   }
 }
 
-// ========================================
-// Initial Mock Data
-// ========================================
-
-const INITIAL_DOWNLOADS: DownloadItem[] = [
-  {
-    id: 'mock-1',
-    filename: 'Big Buck Bunny 4K.mp4',
-    url: 'https://example.com/bbb-4k.mp4',
-    size: 2_100_000_000,
-    downloaded: 2_100_000_000,
-    speed: 0,
-    status: 'completed',
-    category: 'video',
-    addedAt: Date.now() - 7200000,
-    completedAt: Date.now() - 3600000,
-  },
-  {
-    id: 'mock-2',
-    filename: 'lofi-music-collection.zip',
-    url: 'https://example.com/lofi-pack.zip',
-    size: 1_100_000_000,
-    downloaded: 1_100_000_000,
-    speed: 0,
-    status: 'completed',
-    category: 'archive',
-    addedAt: Date.now() - 86400000,
-    completedAt: Date.now() - 82800000,
-  },
-];

@@ -1,4 +1,3 @@
-import { useState } from 'react';
 import { useApp } from '../store/appStore';
 
 const ACCENT_COLORS = [
@@ -12,13 +11,16 @@ const ACCENT_COLORS = [
 ];
 
 export default function Settings() {
-  const { theme, setTheme, accentColor, setAccentColor } = useApp();
-  const [hardwareAccel, setHardwareAccel] = useState(true);
-  const [notifications, setNotifications] = useState(true);
-  const [autoStart, setAutoStart] = useState(false);
-  const [concurrentLimit, setConcurrentLimit] = useState('3');
-  const [speedLimit, setSpeedLimit] = useState('unlimited');
-  const [defaultFolder, setDefaultFolder] = useState('C:\\Users\\Downloads');
+  const { 
+    theme, setTheme, 
+    accentColor, setAccentColor,
+    hardwareAccel, setHardwareAccel,
+    notifications, setNotifications,
+    autoStart, setAutoStart,
+    concurrentLimit, setConcurrentLimit,
+    speedLimit, setSpeedLimit,
+    defaultFolder, setDefaultFolder
+  } = useApp();
 
   return (
     <div className="animate-in" id="settings-page">
@@ -94,8 +96,8 @@ export default function Settings() {
             </div>
             <select
               className="settings-select"
-              value={concurrentLimit}
-              onChange={e => setConcurrentLimit(e.target.value)}
+              value={concurrentLimit.toString()}
+              onChange={e => setConcurrentLimit(parseInt(e.target.value, 10))}
               id="concurrent-select"
             >
               <option value="1">1</option>
