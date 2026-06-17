@@ -1,15 +1,7 @@
 import { useState, useEffect, useRef } from 'react';
-import { useApp, type FileCategory } from '../store/appStore';
+import { useApp, getFileCategoryFromName, extractFilenameFromUrl, type FileCategory } from '../store/appStore';
 
-function getFileCategoryFromName(filename: string): FileCategory {
-  const ext = filename.split('.').pop()?.toLowerCase() || '';
-  if (['mp4', 'mkv', 'avi', 'mov', 'webm'].includes(ext)) return 'video';
-  if (['mp3', 'flac', 'wav', 'aac', 'ogg'].includes(ext)) return 'music';
-  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp'].includes(ext)) return 'image';
-  if (['pdf', 'doc', 'docx', 'txt', 'pptx', 'xlsx'].includes(ext)) return 'document';
-  if (['zip', 'rar', '7z', 'tar', 'gz'].includes(ext)) return 'archive';
-  return 'other';
-}
+
 
 const CATEGORIES: { id: FileCategory; label: string; icon: string }[] = [
   { id: 'video', label: 'Videos', icon: '🎬' },
@@ -50,7 +42,7 @@ export default function AddDownloadModal() {
   useEffect(() => {
     if (singleUrl.trim()) {
       const url = singleUrl.trim();
-      const extractedName = url.split('/').pop() || '';
+      const extractedName = extractFilenameFromUrl(url);
       // Only overwrite if filename is empty or was previously auto-generated
       if (!singleFilename || singleFilename.startsWith('download-')) {
         setSingleFilename(extractedName || `download-${Date.now()}.bin`);
@@ -78,7 +70,7 @@ export default function AddDownloadModal() {
     e.preventDefault();
     if (!singleUrl.trim()) return;
     const url = singleUrl.trim();
-    const filename = singleFilename.trim() || url.split('/').pop() || `download-${Date.now()}.bin`;
+    const filename = singleFilename.trim() || extractFilenameFromUrl(url) || `download-${Date.now()}.bin`;
     const category = singleCategory;
     const size = 0; // unknown size; main process will update when available
     addDownload(filename, url, size, category);
@@ -100,7 +92,7 @@ export default function AddDownloadModal() {
       .filter(line => line.startsWith('http://') || line.startsWith('https://'));
 
     urls.forEach(url => {
-      const filename = url.split('/').pop() || `download-${Date.now()}.bin`;
+      const filename = extractFilenameFromUrl(url) || `download-${Date.now()}.bin`;
       const category = batchCategory === 'auto' ? getFileCategoryFromName(filename) : batchCategory;
       addDownload(filename, url, 0, category);
     });
@@ -171,7 +163,7 @@ export default function AddDownloadModal() {
     const selectedUrls = importedUrls.filter(item => item.checked).map(item => item.url);
     
     selectedUrls.forEach(url => {
-      const filename = url.split('/').pop() || `download-${Date.now()}.bin`;
+      const filename = extractFilenameFromUrl(url) || `download-${Date.now()}.bin`;
       const category = importCategory === 'auto' ? getFileCategoryFromName(filename) : importCategory;
       addDownload(filename, url, 0, category);
     });

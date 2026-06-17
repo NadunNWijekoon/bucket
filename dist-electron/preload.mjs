@@ -17,10 +17,14 @@ electron.contextBridge.exposeInMainWorld("electronAPI", {
 		return () => electron.ipcRenderer.removeListener(`download-metadata-${id}`, subscription);
 	},
 	onDownloadCompleted: (id, callback) => {
-		electron.ipcRenderer.once(`download-completed-${id}`, (_event, data) => callback(data));
+		const subscription = (_event, data) => callback(data);
+		electron.ipcRenderer.on(`download-completed-${id}`, subscription);
+		return () => electron.ipcRenderer.removeListener(`download-completed-${id}`, subscription);
 	},
 	onDownloadFailed: (id, callback) => {
-		electron.ipcRenderer.once(`download-failed-${id}`, (_event, data) => callback(data));
+		const subscription = (_event, data) => callback(data);
+		electron.ipcRenderer.on(`download-failed-${id}`, subscription);
+		return () => electron.ipcRenderer.removeListener(`download-failed-${id}`, subscription);
 	}
 });
 //#endregion

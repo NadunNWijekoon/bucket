@@ -7,7 +7,7 @@ declare interface Window {
     cancelDownload: (id: string) => void;
     onDownloadProgress: (id: string, callback: (data: { percent: number, transferred: number, total: number, speed: number }) => void) => () => void;
     onDownloadMetadata: (id: string, callback: (data: { filename?: string, total?: number }) => void) => () => void;
-    onDownloadCompleted: (id: string, callback: (data: { filePath: string }) => void) => void;
-    onDownloadFailed: (id: string, callback: (error: string) => void) => void;
+    onDownloadCompleted: (id: string, callback: (data: { filePath: string }) => void) => () => void;
+    onDownloadFailed: (id: string, callback: (error: string) => void) => () => void;
   }
 }

@@ -1,4 +1,4 @@
-import { createContext, useContext, useState, useEffect, useCallback, type ReactNode } from 'react';
+import { createContext, useContext, useState, useEffect, useCallback, useRef, type ReactNode } from 'react';
 
 // ========================================
 // Types
@@ -120,79 +120,95 @@ export function AppProvider({ children }: { children: ReactNode }) {
     setIsAddModalOpen(false);
   }, []);
 
-  // Real or Simulated download progress
+  // Simulation for Web (non-Electron)
   useEffect(() => {
-    const inElectron = !!(window as any).electronAPI;
-    if (!inElectron) {
-      // Simulation for Web
-      const interval = setInterval(() => {
-        setDownloads(prev => prev.map(dl => {
-          if (dl.status !== 'downloading') return dl;
-          const speed = 800000 + Math.random() * 4200000;
-          const newDownloaded = Math.min(dl.downloaded + speed * 0.5, dl.size);
-          const remaining = dl.size - newDownloaded;
-          const eta = speed > 0 ? remaining / speed : 0;
-          if (newDownloaded >= dl.size) {
-            return { ...dl, downloaded: dl.size, speed: 0, status: 'completed' as DownloadStatus, completedAt: Date.now(), eta: 0 };
-          }
-          return { ...dl, downloaded: newDownloaded, speed, eta };
-        }));
-      }, 500);
-      return () => clearInterval(interval);
-    } else {
-      // Real Electron Logic
-      const progressUnsubs: (() => void)[] = [];
-
-      downloads.forEach(dl => {
-        if (dl.status === 'downloading') {
-          const unsub = window.electronAPI.onDownloadProgress(dl.id, (data) => {
-            setDownloads(prev => prev.map(item => {
-              if (item.id === dl.id) {
-                const remaining = item.size - data.transferred;
-                return {
-                  ...item,
-                  downloaded: data.transferred,
-                  speed: data.speed,
-                  eta: data.speed > 0 ? remaining / data.speed : 0
-                };
-              }
-              return item;
-            }));
-          });
-          progressUnsubs.push(unsub);
-
-          window.electronAPI.onDownloadCompleted(dl.id, () => {
-            setDownloads(prev => prev.map(item =>
-              item.id === dl.id ? { ...item, status: 'completed', completedAt: Date.now(), speed: 0, eta: 0 } : item
-            ));
-          });
-
-          window.electronAPI.onDownloadFailed(dl.id, (err) => {
-            console.error(`Download failed: ${dl.filename}`, err);
-            setDownloads(prev => prev.map(item =>
-              item.id === dl.id ? { ...item, status: 'failed', speed: 0, eta: 0 } : item
-            ));
-          });
+    if ((window as any).electronAPI) return;
+    const interval = setInterval(() => {
+      setDownloads(prev => prev.map(dl => {
+        if (dl.status !== 'downloading') return dl;
+        const speed = 800000 + Math.random() * 4200000;
+        const newDownloaded = Math.min(dl.downloaded + speed * 0.5, dl.size);
+        const remaining = dl.size - newDownloaded;
+        const eta = speed > 0 ? remaining / speed : 0;
+        if (newDownloaded >= dl.size) {
+          return { ...dl, downloaded: dl.size, speed: 0, status: 'completed' as DownloadStatus, completedAt: Date.now(), eta: 0 };
         }
-      });
+        return { ...dl, downloaded: newDownloaded, speed, eta };
+      }));
+    }, 500);
+    return () => clearInterval(interval);
+  }, []);
 
-      // Metadata subscriptions (filename, total size)
-      downloads.forEach(dl => {
-        if (dl.status === 'downloading') {
-          const metaUnsub = window.electronAPI.onDownloadMetadata(dl.id, (meta) => {
-            setDownloads(prev => prev.map(item => item.id === dl.id ? {
-              ...item,
-              size: typeof meta.total === 'number' ? meta.total : item.size,
-              filename: meta.filename || item.filename,
-            } : item));
-          });
-          progressUnsubs.push(metaUnsub);
-        }
-      });
+  // Registry of active IPC unsubscribe functions, keyed by download id.
+  // Using a ref so registration doesn't trigger re-renders.
+  const ipcCleanupRef = useRef<Map<string, (() => void)[]>>(new Map());
 
-      return () => progressUnsubs.forEach(u => u());
-    }
-  }, [downloads.length]);
+  const registerDownloadListeners = useCallback((dl: DownloadItem) => {
+    if (!(window as any).electronAPI) return;
+    // Prevent double-registration
+    if (ipcCleanupRef.current.has(dl.id)) return;
+
+    const cleanups: (() => void)[] = [];
+
+    // Progress
+    const unsubProgress = window.electronAPI.onDownloadProgress(dl.id, (data: any) => {
+      setDownloads(prev => prev.map(item => {
+        if (item.id !== dl.id) return item;
+        const transferred = data.transferred ?? 0;
+        const total = data.total ?? item.size;
+        const speed = data.speed ?? 0;
+        const remaining = total > 0 ? total - transferred : 0;
+        return {
+          ...item,
+          downloaded: transferred,
+          size: total > 0 ? total : item.size,
+          speed,
+          eta: speed > 0 && remaining > 0 ? remaining / speed : 0,
+        };
+      }));
+    });
+    cleanups.push(unsubProgress);
+
+    // Metadata (filename / total size from response headers).
+    // Also re-derives category from the real server-provided filename so that
+    // e.g. a URL with no extension still gets the right icon once headers arrive.
+    const unsubMeta = window.electronAPI.onDownloadMetadata(dl.id, (meta: any) => {
+      setDownloads(prev => prev.map(item => {
+        if (item.id !== dl.id) return item;
+        const realFilename = meta.filename || item.filename;
+        const realSize = typeof meta.total === 'number' && meta.total > 0 ? meta.total : item.size;
+        // Only update category if the real filename gives us a better answer
+        const derivedCategory = getFileCategoryFromName(realFilename);
+        const newCategory = derivedCategory !== 'other' ? derivedCategory : item.category;
+        return { ...item, filename: realFilename, size: realSize, category: newCategory };
+      }));
+    });
+    cleanups.push(unsubMeta);
+
+    // Completed
+    const unsubCompleted = window.electronAPI.onDownloadCompleted(dl.id, (_data: any) => {
+      setDownloads(prev => prev.map(item =>
+        item.id !== dl.id ? item : { ...item, status: 'completed', completedAt: Date.now(), speed: 0, eta: 0, downloaded: item.size > 0 ? item.size : item.downloaded }
+      ));
+      // Self-clean all listeners for this download
+      const fns = ipcCleanupRef.current.get(dl.id);
+      if (fns) { fns.forEach(f => f()); ipcCleanupRef.current.delete(dl.id); }
+    });
+    cleanups.push(unsubCompleted);
+
+    // Failed
+    const unsubFailed = window.electronAPI.onDownloadFailed(dl.id, (err: string) => {
+      console.error(`[renderer] Download failed: ${dl.filename}`, err);
+      setDownloads(prev => prev.map(item =>
+        item.id !== dl.id ? item : { ...item, status: 'failed', speed: 0, eta: 0 }
+      ));
+      const fns = ipcCleanupRef.current.get(dl.id);
+      if (fns) { fns.forEach(f => f()); ipcCleanupRef.current.delete(dl.id); }
+    });
+    cleanups.push(unsubFailed);
+
+    ipcCleanupRef.current.set(dl.id, cleanups);
+  }, []);
 
   const addDownload = useCallback((filename: string, url: string, size: number, category: FileCategory) => {
     const id = crypto.randomUUID();
@@ -203,46 +219,57 @@ export function AppProvider({ children }: { children: ReactNode }) {
       size,
       downloaded: 0,
       speed: 0,
-        status: (window as any).electronAPI ? 'downloading' : 'queued',
+      status: (window as any).electronAPI ? 'downloading' : 'queued',
       category,
       addedAt: Date.now(),
     };
-    
+
     setDownloads(prev => [...prev, newDl]);
 
     if ((window as any).electronAPI) {
+      // Register IPC listeners BEFORE telling main process to start,
+      // so we never miss the first progress/metadata event.
+      registerDownloadListeners(newDl);
       try {
-        // Helpful debug log to ensure renderer is invoking the main process correctly
         console.log('[renderer] startDownload', { id, url, filename });
         (window as any).electronAPI.startDownload({ id, url, filename });
       } catch (err) {
         console.error('[renderer] startDownload error', err);
-        // Mark item failed locally so UI reflects the error
         setDownloads(prev => prev.map(d => d.id === id ? { ...d, status: 'failed' as DownloadStatus } : d));
+        // Clean up listeners we just registered
+        const fns = ipcCleanupRef.current.get(id);
+        if (fns) { fns.forEach(f => f()); ipcCleanupRef.current.delete(id); }
       }
     }
-  }, [setDownloads]);
+  }, [setDownloads, registerDownloadListeners]);
 
   const pauseDownload = useCallback((id: string) => {
     if ((window as any).electronAPI) {
-       // Future: implement pause in main process
-       (window as any).electronAPI.cancelDownload(id);
+      (window as any).electronAPI.cancelDownload(id);
     }
+    // Clean up IPC listeners for this download
+    const fns = ipcCleanupRef.current.get(id);
+    if (fns) { fns.forEach(f => f()); ipcCleanupRef.current.delete(id); }
     setDownloads(prev => prev.map(d => d.id === id ? { ...d, status: 'paused' as DownloadStatus, speed: 0 } : d));
   }, [setDownloads]);
 
   const resumeDownload = useCallback((id: string) => {
     const dl = downloads.find(d => d.id === id);
     if ((window as any).electronAPI && dl) {
+      // Re-register listeners for the resumed download
+      registerDownloadListeners(dl);
       (window as any).electronAPI.startDownload({ id: dl.id, url: dl.url, filename: dl.filename });
     }
     setDownloads(prev => prev.map(d => d.id === id ? { ...d, status: 'downloading' as DownloadStatus } : d));
-  }, [downloads, setDownloads]);
+  }, [downloads, setDownloads, registerDownloadListeners]);
 
   const cancelDownload = useCallback((id: string) => {
     if ((window as any).electronAPI) {
       (window as any).electronAPI.cancelDownload(id);
     }
+    // Clean up IPC listeners
+    const fns = ipcCleanupRef.current.get(id);
+    if (fns) { fns.forEach(f => f()); ipcCleanupRef.current.delete(id); }
     setDownloads(prev => prev.filter(d => d.id !== id));
   }, [setDownloads]);
 
@@ -299,8 +326,36 @@ export function useApp() {
 }
 
 // ========================================
-// Helpers (Unchanged)
+// Shared Helpers
 // ========================================
+
+/**
+ * Extracts a clean filename from a URL, stripping query params and hash
+ * so that e.g. https://cdn.example.com/video.mp4?token=abc → "video.mp4"
+ */
+export function extractFilenameFromUrl(url: string): string {
+  try {
+    const parsed = new URL(url);
+    // Take only the path segment, ignore query/hash
+    const pathname = parsed.pathname;
+    const last = pathname.split('/').filter(Boolean).pop() || '';
+    return decodeURIComponent(last);
+  } catch {
+    // Fallback for malformed URLs
+    return url.split('/').pop()?.split('?')[0].split('#')[0] || '';
+  }
+}
+
+/** Maps a filename (or just its extension) to a FileCategory. */
+export function getFileCategoryFromName(filename: string): FileCategory {
+  const ext = filename.split('.').pop()?.toLowerCase().split('?')[0].split('#')[0] || '';
+  if (['mp4', 'mkv', 'avi', 'mov', 'webm', 'flv', 'wmv', 'm4v'].includes(ext)) return 'video';
+  if (['mp3', 'flac', 'wav', 'aac', 'ogg', 'm4a', 'opus', 'wma'].includes(ext)) return 'music';
+  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'avif', 'ico'].includes(ext)) return 'image';
+  if (['pdf', 'doc', 'docx', 'txt', 'pptx', 'ppt', 'xlsx', 'xls', 'csv', 'md'].includes(ext)) return 'document';
+  if (['zip', 'rar', '7z', 'tar', 'gz', 'bz2', 'xz', 'zst'].includes(ext)) return 'archive';
+  return 'other';
+}
 
 export function formatBytes(bytes: number): string {
   if (bytes === 0) return '0 B';

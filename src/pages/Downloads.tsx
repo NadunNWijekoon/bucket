@@ -6,18 +6,11 @@ import {
   formatEta,
   getCategoryIcon,
   getCategoryColor,
-  type FileCategory,
+  getFileCategoryFromName,
+  extractFilenameFromUrl,
 } from '../store/appStore';
 
-function getFileCategoryFromName(filename: string): FileCategory {
-  const ext = filename.split('.').pop()?.toLowerCase() || '';
-  if (['mp4', 'mkv', 'avi', 'mov', 'webm'].includes(ext)) return 'video';
-  if (['mp3', 'flac', 'wav', 'aac', 'ogg'].includes(ext)) return 'music';
-  if (['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp'].includes(ext)) return 'image';
-  if (['pdf', 'doc', 'docx', 'txt', 'pptx', 'xlsx'].includes(ext)) return 'document';
-  if (['zip', 'rar', '7z', 'tar', 'gz'].includes(ext)) return 'archive';
-  return 'other';
-}
+
 
 export default function Downloads() {
   const { downloads, addDownload, pauseDownload, resumeDownload, cancelDownload, openDownloadFolder } = useApp();
@@ -36,7 +29,7 @@ export default function Downloads() {
   const handleAdd = () => {
     if (!urlInput.trim()) return;
     const url = urlInput.trim();
-    const filename = url.split('/').pop() || `download-${Date.now()}.bin`;
+    const filename = extractFilenameFromUrl(url) || `download-${Date.now()}.bin`;
     // We'll trust the headers for real size, but use 1GB for UI if unknown
     const size = 0; // unknown size; will update when main process reports content-length
     const category = getFileCategoryFromName(filename);
